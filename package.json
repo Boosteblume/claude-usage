@@ -14,7 +14,8 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "chalk": "^5.3.0",

@@ -11,6 +11,10 @@ import {
   indent,
 } from "../lib/format";
 
+export interface SavingsOptions {
+  format: string;
+}
+
 // ─── Aggregation ──────────────────────────────────────────────────────────────
 
 interface AggregatedToolStats {
@@ -122,7 +126,14 @@ function sectionHeader(icon: string, title: string): void {
 
 // ─── Command ──────────────────────────────────────────────────────────────────
 
-export async function savingsCommand(): Promise<void> {
+export async function savingsCommand(options: SavingsOptions): Promise<void> {
+  if (options.format !== "table" && options.format !== "json") {
+    console.error(
+      chalk.red(`Invalid --format "${options.format}". Use: table, json`),
+    );
+    process.exit(1);
+  }
+
   process.stderr.write(chalk.dim("  Loading session data...\n"));
   const projects = await loadSavingsData();
   process.stderr.write("\x1B[1A\x1B[2K");
@@ -132,6 +143,7 @@ export async function savingsCommand(): Promise<void> {
     return;
   }
 
+  // All aggregations happen BEFORE the format branch so JSON gets the same data
   const toolStats = aggregateToolStats(projects);
   const thinking = calcThinkingOverhead(projects);
   const runaway = findRunawaySessions(projects);
@@ -142,6 +154,37 @@ export async function savingsCommand(): Promise<void> {
     )
     .filter(({ session }) => session.turns.length > 80)
     .sort((a, b) => b.session.turns.length - a.session.turns.length);
+
+  // ─── JSON branch ─────────────────────────────────────────────────────────
+  if (options.format === "json") {
+    console.log(
+      JSON.stringify(
+        {
+          toolStats,
+          runaway: {
+            count: runaway.length,
+            sessions: runaway.map(({ session, projectPath }) => ({
+              sessionId: session.sessionId,
+              projectPath,
+              turns: session.turns.length,
+              contextGrowthFactor: session.contextGrowthFactor,
+              peakContextTokens: session.peakContextTokens,
+            })),
+          },
+          missingClaudeIgnore: missingIgnore.map((p) => p.projectPath),
+          thinkingOverhead: thinking,
+          longSessions: longSessions.map(({ session, projectPath }) => ({
+            sessionId: session.sessionId,
+            projectPath,
+            turns: session.turns.length,
+          })),
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
 
   console.log();
   console.log(chalk.bold.cyan("  TOKEN SAVINGS ANALYSIS"));

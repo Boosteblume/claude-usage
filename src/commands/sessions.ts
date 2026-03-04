@@ -13,6 +13,7 @@ import {
   formatCost,
   formatDate,
   indent,
+  formatSparkline,
 } from "../lib/format";
 
 export interface SessionsOptions {
@@ -148,6 +149,20 @@ function renderSessionDetail(detail: SessionDetail): void {
       ),
     );
   }
+
+  const contextValues = turns.map((t) => t.totalContextTokens);
+  const ctxSparkWidth = Math.min(contextValues.length, 40);
+  const ctxSparkline = formatSparkline(contextValues, ctxSparkWidth);
+  const ctxMin = contextValues.reduce((a, b) => (b < a ? b : a), Infinity);
+  const ctxMax = contextValues.reduce((a, b) => (b > a ? b : a), 0);
+  const ctxMinFormatted = formatTokenCount(isFinite(ctxMin) ? ctxMin : 0);
+  const ctxMaxFormatted = formatTokenCount(ctxMax);
+
+  console.log(
+    `  Context arc   ${chalk.cyan(ctxSparkline)}` +
+      chalk.dim(`  ${ctxMinFormatted} → ${ctxMaxFormatted}`),
+  );
+  console.log();
 
   if (turns.length > 50) {
     console.log(
