@@ -8,18 +8,13 @@ import {
   formatPercent,
   formatDate,
   formatDateRange,
+  indent,
 } from "../lib/format";
 
 export interface SummaryOptions {
   since?: string;
   format: string;
 }
-
-const indent = (s: string): string =>
-  s
-    .split("\n")
-    .map((l) => `  ${l}`)
-    .join("\n");
 
 export async function summaryCommand(options: SummaryOptions): Promise<void> {
   // ─── Option validation ────────────────────────────────────────────────────

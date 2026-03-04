@@ -13,6 +13,8 @@ import {
   type ProjectSavingsData,
   type TurnSavingsData,
   type ToolCallRecord,
+  TurnDetail,
+  SessionDetail,
 } from "./types";
 
 import {
@@ -149,8 +151,6 @@ function buildSessionStats(
   const firstEntry = entries.at(0);
   if (firstEntry === undefined) return null;
 
-  // cwd from the entry is the ground truth — the dir name encoding is lossy
-  // (hyphens replace slashes, so wa-platform is indistinguishable from wa/platform)
   const projectPath = firstEntry.cwd ?? fallbackProjectPath;
 
   let startedAt = new Date(firstEntry.timestamp);
@@ -160,6 +160,11 @@ function buildSessionStats(
   let totalCacheReadTokens = 0;
   let totalCacheCreationTokens = 0;
   let totalCostUSD = 0;
+
+  // undefined = not yet seen first turn; avoids the -1 sentinel smell
+  let firstTurnContextTokens: number | undefined;
+  let lastTurnContextTokens = 0;
+  let peakContextTokens = 0;
 
   for (const entry of entries) {
     const { usage, model } = entry.message;
@@ -172,7 +177,22 @@ function buildSessionStats(
     const ts = new Date(entry.timestamp);
     if (ts < startedAt) startedAt = ts;
     if (ts > lastActiveAt) lastActiveAt = ts;
+
+    // Total context this turn = everything sent to the model
+    const turnCtx =
+      usage.input_tokens +
+      usage.cache_read_input_tokens +
+      usage.cache_creation_input_tokens;
+
+    firstTurnContextTokens ??= turnCtx; // set once on first iteration
+    lastTurnContextTokens = turnCtx;
+    if (turnCtx > peakContextTokens) peakContextTokens = turnCtx;
   }
+
+  const contextGrowthFactor =
+    firstTurnContextTokens !== undefined && firstTurnContextTokens > 0
+      ? lastTurnContextTokens / firstTurnContextTokens
+      : 1;
 
   return {
     sessionId: firstEntry.sessionId,
@@ -186,6 +206,11 @@ function buildSessionStats(
     totalCostUSD,
     startedAt,
     lastActiveAt,
+    contextGrowthFactor,
+    peakContextTokens,
+    hasRunawayContext:
+      (contextGrowthFactor > 4 && entries.length > 15) ||
+      peakContextTokens > 200_000,
   };
 }
 
@@ -394,30 +419,43 @@ function buildSessionSavingsData(
       thinkingTokensEstimate,
     };
   });
+  const turnContextSizes = assistantEntries.map((e) => {
+    const { usage } = e.data.message;
+    return (
+      usage.input_tokens +
+      usage.cache_read_input_tokens +
+      usage.cache_creation_input_tokens
+    );
+  });
 
-  const firstTurn = turns.at(0);
-  const lastTurn = turns.at(-1);
+  const firstContextSize = turnContextSizes.at(0) ?? 0;
+  const lastContextSize = turnContextSizes.at(-1) ?? 0;
+  const peakContextTokens = turnContextSizes.reduce(
+    (max, v) => Math.max(max, v),
+    0,
+  );
+
   const contextGrowthFactor =
-    firstTurn !== undefined &&
-    lastTurn !== undefined &&
-    firstTurn.inputTokens > 0
-      ? lastTurn.inputTokens / firstTurn.inputTokens
-      : 1;
+    firstContextSize > 0 ? lastContextSize / firstContextSize : 1;
 
   return {
     sessionId,
     projectPath,
     turns,
-    // growth > 4x AND non-trivial session length = runaway
-    hasRunawayContext: contextGrowthFactor > 4 && turns.length > 15,
     contextGrowthFactor,
+    peakContextTokens,
+    hasRunawayContext:
+      (contextGrowthFactor > 4 && turns.length > 15) ||
+      peakContextTokens > 200_000,
   };
 }
 
 export async function loadSavingsData(): Promise<ProjectSavingsData[]> {
   let dirEntries: Dirent[];
   try {
-    dirEntries = await fs.readdir(CLAUDE_PROJECTS_DIR, { withFileTypes: true });
+    dirEntries = await fs.readdir(CLAUDE_PROJECTS_DIR, {
+      withFileTypes: true,
+    });
   } catch {
     return [];
   }
@@ -465,4 +503,86 @@ export async function loadSavingsData(): Promise<ProjectSavingsData[]> {
   }
 
   return projects;
+}
+
+export async function loadSessionDetail(
+  filePath: string,
+): Promise<SessionDetail | null> {
+  const entries = await readAllEntries(filePath);
+
+  const assistantEntries = entries
+    .filter((e): e is AssistantParsedEntry => e.type === "assistant")
+    .sort(
+      (a, b) =>
+        new Date(a.data.timestamp).getTime() -
+        new Date(b.data.timestamp).getTime(),
+    );
+
+  const firstEntry = assistantEntries.at(0);
+  if (firstEntry === undefined) return null;
+
+  const { sessionId, cwd } = firstEntry.data;
+  const projectPath = cwd ?? "unknown";
+
+  let totalCostUSD = 0;
+  let prevTotalContextTokens = 0;
+
+  const turns: TurnDetail[] = assistantEntries.map((entry, index) => {
+    const { usage, model, content } = entry.data.message;
+    const toolUses = extractToolUses(content);
+    const thinkingBlocks = extractThinkingBlocks(content);
+
+    const cost = calculateCost(usage, model);
+    totalCostUSD += cost;
+
+    const totalContextTokens =
+      usage.input_tokens +
+      usage.cache_read_input_tokens +
+      usage.cache_creation_input_tokens;
+
+    // index === 0: delta is the full context (no previous turn)
+    const contextDelta =
+      index === 0
+        ? totalContextTokens
+        : totalContextTokens - prevTotalContextTokens;
+    prevTotalContextTokens = totalContextTokens;
+
+    const thinkingTokensEstimate = thinkingBlocks.reduce(
+      (sum, block) => sum + estimateTokens(block.thinking),
+      0,
+    );
+
+    return {
+      turnIndex: index,
+      timestamp: new Date(entry.data.timestamp),
+      freshInputTokens: usage.input_tokens,
+      totalContextTokens,
+      contextDelta,
+      outputTokens: usage.output_tokens,
+      costUSD: cost,
+      model,
+      toolNames: toolUses.map((tu) => tu.name),
+      thinkingTokensEstimate,
+    };
+  });
+
+  const firstCtx = turns.at(0)?.totalContextTokens ?? 0;
+  const lastCtx = turns.at(-1)?.totalContextTokens ?? 0;
+  const peakContextTokens = turns.reduce(
+    (max, t) => Math.max(max, t.totalContextTokens),
+    0,
+  );
+  const contextGrowthFactor = firstCtx > 0 ? lastCtx / firstCtx : 1;
+
+  return {
+    sessionId,
+    projectPath,
+    totalCostUSD,
+    contextGrowthFactor,
+    peakContextTokens,
+    hasRunawayContext:
+      (contextGrowthFactor > 4 && turns.length > 15) ||
+      peakContextTokens > 200_000,
+    turns,
+  };
 }

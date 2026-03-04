@@ -3,7 +3,13 @@ import chalk from "chalk";
 import Table from "cli-table3";
 import { loadSavingsData } from "../parser/reader";
 import type { ProjectSavingsData, SessionSavingsData } from "../parser/types";
-import { formatTokenCount } from "../lib/format";
+import {
+  formatTokenCount,
+  formatCost,
+  formatPercent,
+  formatDate,
+  indent,
+} from "../lib/format";
 
 // ─── Aggregation ──────────────────────────────────────────────────────────────
 
@@ -109,11 +115,6 @@ function findRunawaySessions(
 
 const HOME = os.homedir();
 const shortPath = (p: string): string => p.replace(HOME, "~");
-const indent = (s: string): string =>
-  s
-    .split("\n")
-    .map((l) => `  ${l}`)
-    .join("\n");
 
 function sectionHeader(icon: string, title: string): void {
   console.log(chalk.bold(`  ${icon}  ${title}`));
@@ -281,13 +282,10 @@ export async function savingsCommand(): Promise<void> {
       ),
     );
     for (const { session, projectPath } of runaway.slice(0, 5)) {
-      const peak = session.turns.at(-1)?.inputTokens ?? 0;
-      console.log(
-        `  ${chalk.red("✗")} ${shortPath(projectPath)} / ${chalk.dim(session.sessionId.slice(0, 8) + "…")}`,
-      );
+      const peak = session.peakContextTokens;
       console.log(
         chalk.dim(
-          `       ${session.turns.length} turns · grew ${session.contextGrowthFactor.toFixed(1)}x · peak ${formatTokenCount(peak)} input tokens`,
+          `       ${session.turns.length} turns · grew ${session.contextGrowthFactor.toFixed(1)}x · peak ${formatTokenCount(peak)} context tokens`,
         ),
       );
       console.log(
